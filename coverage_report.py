@@ -17,7 +17,7 @@ MAX_LOW_COVERAGE_PERCENT = 10  # Maksimum düşük kapsamalı bölge yüzdesi
 class NGSQualityReport:
     def __init__(self):
         self.root = Tk()
-        self.root.title("NGS Kalite Rapor v4.3")
+        self.root.title("NGS Kalite Rapor v4.4")
         self.selected_files = []
         self.cancel_requested = False
         self.setup_gui()
@@ -132,29 +132,40 @@ class NGSQualityReport:
         issues = []
         recommendations = []
         
-        # Ortalama kapsama kontrolü (30 puan)
-        if data['mean_coverage'] < MIN_MEAN_COVERAGE:
-            score -= 30
-            issues.append(f"Düşük ortalama kapsama: {data['mean_coverage']:.1f}x (Min: {MIN_MEAN_COVERAGE}x)")
-            recommendations.append("Kütüphane hazırlama ve sekanslama derinliğini artırın")
-        
-        # Medyan kapsama kontrolü (20 puan)
-        if data['median_coverage'] < MIN_MEDIAN_COVERAGE:
-            score -= 20
-            issues.append(f"Düşük medyan kapsama: {data['median_coverage']:.1f}x (Min: {MIN_MEDIAN_COVERAGE}x)")
-            recommendations.append("Sekanslama kalitesini ve derinliğini artırın")
-        
         # Düşük kapsamalı bölge kontrolü (30 puan)
         if data['low_coverage_percentage'] > MAX_LOW_COVERAGE_PERCENT:
             score -= 30
             issues.append(f"Yüksek oranda düşük kapsamalı bölge: %{data['low_coverage_percentage']:.1f} (Max: %{MAX_LOW_COVERAGE_PERCENT})")
-            recommendations.append("Hedef bölge kapsamasını iyileştirin ve PCR duplikasyonlarını azaltın")
-        
+            if data['low_coverage_percentage'] > 80:
+                recommendations.append("Örnek kalitesini kontrol edin (olası doku otolizi/nekrozu)")
+            elif data['low_coverage_percentage'] > 50:
+                recommendations.append("DNA miktarı ve kalitesini kontrol edin (olası doku azlığı/degradasyonu)")
+            else:
+                recommendations.append("Hedef bölge kapsamasını kontrol edin (olası teknik sorun)")
+
+        # Ortalama kapsama kontrolü (30 puan)
+        if data['mean_coverage'] < MIN_MEAN_COVERAGE:
+            score -= 30
+            issues.append(f"Düşük ortalama kapsama: {data['mean_coverage']:.1f}x (Min: {MIN_MEAN_COVERAGE}x)")
+            if data['mean_coverage'] < 100:
+                recommendations.append("DNA kalitesini ve miktarını kontrol edin (olası düşük DNA konsantrasyonu)")
+            else:
+                recommendations.append("Sekanslama derinliğini kontrol edin")
+
         # Medyan/Ortalama oranı kontrolü (20 puan)
         if data['med_mean_ratio'] < MIN_MED_MEAN_RATIO:
             score -= 20
             issues.append(f"Düşük Medyan/Ortalama oranı: {data['med_mean_ratio']:.2f} (Min: {MIN_MED_MEAN_RATIO})")
-            recommendations.append("Kütüphane kompleksitesini artırın ve PCR bias'ı azaltın")
+            if data['med_mean_ratio'] < 0.7:
+                recommendations.append("DNA fragmentasyon seviyesini kontrol edin (olası DNA degradasyonu)")
+            else:
+                recommendations.append("Kütüphane hazırlama sürecini kontrol edin")
+
+        # Medyan kapsama kontrolü (20 puan)
+        if data['median_coverage'] < MIN_MEDIAN_COVERAGE:
+            score -= 20
+            issues.append(f"Düşük medyan kapsama: {data['median_coverage']:.1f}x (Min: {MIN_MEDIAN_COVERAGE}x)")
+            recommendations.append("Sekanslama kalitesini kontrol edin")
 
         # Kalite seviyesi belirleme
         if score >= 90:
@@ -244,7 +255,13 @@ IYILESTIRME ONERILERI:
 
     def generate_reports(self):
         self.result_text.delete('1.0', END)
+        warning = """
+!!! UYARI: Bu rapordaki sonuçlar ve öneriler tavsiye niteliğindedir. 
+    Nihai değerlendirme için laboratuvar sorumlusu ile görüşülmelidir. !!!"""
+        
         summary = f"""{'='*80}
+{warning}
+
 TOPLU SONUC OZETI ({len(self.selected_files)} örnek):
 {'-'*80}
 """
