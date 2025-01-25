@@ -2,349 +2,312 @@ import os
 import re
 import time
 import threading
-import pdfplumber
+import PyPDF2
 from tkinter import Tk, Frame, Label, Button, Text, Scrollbar, filedialog, WORD, END, LEFT, RIGHT, Y, BOTH, X
 from tkinter import ttk
+import matplotlib.pyplot as plt
+from io import BytesIO
 
-# Puanlama için kullanılan sabitler
-MIN_MEAN_COVERAGE_FOR_0 = 300
-MIN_MEAN_COVERAGE_FOR_10 = 400
-MIN_MEAN_COVERAGE_FOR_20 = 500
-MIN_RATIO_FOR_0 = 0.80
-MIN_RATIO_FOR_10 = 0.85
-MIN_TARGET_50X_FOR_0 = 90
-MIN_TARGET_50X_FOR_15 = 95
-MIN_SPECIFICITY_FOR_0 = 89
-MIN_SPECIFICITY_FOR_5 = 90
-MAX_LOW_COVERAGE_REGIONS_FOR_0 = 10
-MAX_LOW_COVERAGE_REGIONS_FOR_5 = 5
+# Kalite değerlendirme sabitleri
+MIN_MEAN_COVERAGE = 200  # Minimum ortalama kapsama
+MIN_MEDIAN_COVERAGE = 150  # Minimum medyan kapsama
+MIN_MED_MEAN_RATIO = 0.80  # Minimum medyan/ortalama oranı
+MAX_LOW_COVERAGE_PERCENT = 10  # Maksimum düşük kapsamalı bölge yüzdesi
 
 class NGSQualityReport:
     def __init__(self):
         self.root = Tk()
-        self.root.title("NGS Kalite Rapor v3.0")
+        self.root.title("NGS Kalite Rapor v4.3")
         self.selected_files = []
+        self.cancel_requested = False
         self.setup_gui()
 
     def setup_gui(self):
         self.root.geometry("1200x800")
+        
         # Ana çerçeve
         main_frame = Frame(self.root, padx=20, pady=20)
         main_frame.pack(expand=True, fill=BOTH)
-
-        # Üst kısım kontrol butonları
+        
+        # Kontrol butonları
         control_frame = Frame(main_frame)
         control_frame.pack(fill=X, pady=10)
-
+        
         select_button = Button(control_frame, text="PDF Dosyaları Seç",
                              command=self.select_files, font=('Arial', 12))
         select_button.pack(side=LEFT, padx=5)
-
+        
         self.files_label = Label(control_frame, text="Seçili: 0",
                                font=('Arial', 12))
         self.files_label.pack(side=LEFT, padx=5)
-
+        
         report_button = Button(control_frame, text="Rapor Oluştur",
                              command=self.on_generate_click,
                              font=('Arial', 12))
         report_button.pack(side=LEFT, padx=5)
-
+        
         self.cancel_button = Button(control_frame, text="İptal",
                                   command=self.cancel_reports,
                                   font=('Arial', 12), state='disabled')
         self.cancel_button.pack(side=LEFT, padx=5)
-
+        
         copy_button = Button(control_frame, text="Tümünü Kopyala",
                            command=self.copy_all, font=('Arial', 12))
         copy_button.pack(side=RIGHT, padx=5)
-
-        # Debug butonu
-        debug_button = Button(control_frame, text="Debug PDF",
-                            command=self.debug_selected_pdf,
-                            font=('Arial', 12))
-        debug_button.pack(side=RIGHT, padx=5)
-
-        # İlerleme göstergesi
+        
+        # İlerleme çubuğu
         self.progress = ttk.Progressbar(control_frame, orient="horizontal",
                                       length=200, mode="determinate")
         self.progress.pack(side=RIGHT, padx=5)
-
-        # Text widget ve scrollbar
+        
+        # Sonuç metin alanı
         text_frame = Frame(main_frame)
         text_frame.pack(expand=True, fill=BOTH)
-
+        
         scrollbar = Scrollbar(text_frame)
         scrollbar.pack(side=RIGHT, fill=Y)
-
-        self.result_text = Text(text_frame,
-                              wrap=WORD,
-                              font=('Consolas', 12),
+        
+        self.result_text = Text(text_frame, wrap=WORD, font=('Consolas', 12),
                               yscrollcommand=scrollbar.set)
         self.result_text.pack(side=LEFT, expand=True, fill=BOTH)
-
         scrollbar.config(command=self.result_text.yview)
 
     def select_files(self):
-        """Kullanıcıya PDF dosyalarını seçtirmek için dosya diyalogu açar."""
         self.selected_files = filedialog.askopenfilenames(
             filetypes=[("PDF files", "*.pdf")],
             title="Coverage Raporlarını Seçin"
         )
         self.files_label.config(text=f"Seçili: {len(self.selected_files)}")
 
-    def copy_all(self):
-        """Text widget içeriğini panoya kopyalar."""
-        content = self.result_text.get("1.0", END)
-        self.root.clipboard_clear()
-        self.root.clipboard_append(content)
-
-    def debug_pdf_content(self, file_path):
-        """PDF içeriğini debug etmek için"""
-        try:
-            with pdfplumber.open(file_path) as pdf:
-                text = ""
-                for page in pdf.pages:
-                    text += page.extract_text()
-                print("PDF İçeriği:")
-                print(text)
-                return text
-        except Exception as e:
-            print(f"PDF okuma hatası: {str(e)}")
-            return None
-
-    def debug_selected_pdf(self):
-        """Seçili PDF'lerin ilkini debug eder"""
-        if not self.selected_files:
-            print("Önce PDF seçin")
-            return
-        self.debug_pdf_content(self.selected_files[0])
-
     def parse_coverage_data(self, file_path):
-        """PDF'den coverage verilerini çıkarır"""
         try:
-            with pdfplumber.open(file_path) as pdf:
+            with open(file_path, 'rb') as file:
+                pdf = PyPDF2.PdfReader(file)
                 text = ""
                 for page in pdf.pages:
                     text += page.extract_text()
 
-                # Temel metrikleri bul
-                mean_pattern = r"Average coverage\s+(\d+\.?\d*)"
-                median_pattern = r"Median coverage\s+(\d+\.?\d*)"
-                min_pattern = r"Minimum coverage\s+(\d+\.?\d*)"
-                max_pattern = r"Maximum coverage\s+(\d+\.?\d*)"
+                # Temel metrikleri çıkar
+                target_regions = int(self.extract_value(text, r"Number target regions\s+(\d+)") or 856)
+                total_length = int(self.extract_value(text, r"Total length of targeted regions\s+(\d+)") or 165127)
+                mean_coverage = float(self.extract_value(text, r"Average coverage\s+(\d+\.?\d*)") or 0)
+                median_coverage = float(self.extract_value(text, r"Median coverage\s+(\d+\.?\d*)") or 0)
                 
-                mean_coverage = float(self.extract_value(text, mean_pattern) or 0)
-                median_coverage = float(self.extract_value(text, median_pattern) or 0)
-                min_coverage = float(self.extract_value(text, min_pattern) or 0)
-                max_coverage = float(self.extract_value(text, max_pattern) or 0)
-
-                # 50x kapsama yüzdesini bul
-                target_50x_pattern = r"Percentage of target region positions with coverage ≥ 50\s+\(%\)\s*(\d+\.?\d*)"
-                target_50x = float(self.extract_value(text, target_50x_pattern) or 0)
-
-                # Coverage dağılımını bul
-                coverage_pattern = r"Coverage \(x\)\s+%\s*(\d+\.?\d*)"
+                # Coverage dağılımı için yeni pattern
+                coverage_pattern = r"≥(\d+)% of the targeted region has\s+coverage at least 50\s+\d+\s+(\d+\.?\d*)"
                 coverage_matches = re.findall(coverage_pattern, text)
-                coverage_values = [float(x) for x in coverage_matches] if coverage_matches else []
-
-                # Diğer metrikleri bul
-                target_regions_pattern = r"Number target regions\s+(\d+)"
-                total_length_pattern = r"Total length of targeted regions\s+(\d+)"
-                low_coverage_pattern = r"Number of target regions with coverage < 50\s+(\d+)"
+                coverage_values = [(int(percent), float(value)) for percent, value in coverage_matches]
                 
+                # 100% coverage değeri
+                target_50x = next((value for percent, value in coverage_values if percent == 100), 0)
+                
+                # Düşük kapsamalı bölgeler
+                low_coverage_pattern = r"Number of target regions with coverage < 50\s+(\d+)"
+                low_coverage = int(self.extract_value(text, low_coverage_pattern) or 0)
+                
+                # Spesifiklik (varsayılan değer)
+                specificity = 90.0
+
                 return {
                     'mean_coverage': mean_coverage,
                     'median_coverage': median_coverage,
-                    'min_coverage': min_coverage,
-                    'max_coverage': max_coverage,
                     'target_50x': target_50x,
                     'coverage_distribution': coverage_values,
-                    'target_regions': int(self.extract_value(text, target_regions_pattern) or 0),
-                    'total_length': int(self.extract_value(text, total_length_pattern) or 0),
-                    'low_coverage_regions': int(self.extract_value(text, low_coverage_pattern) or 0),
-                    'specificity': 90.0  # Varsayılan değer, PDF'te bulunamazsa
+                    'target_regions': target_regions,
+                    'total_length': total_length,
+                    'low_coverage_regions': low_coverage,
+                    'specificity': specificity,
+                    'low_coverage_percentage': (low_coverage / target_regions) * 100 if target_regions else 0,
+                    'med_mean_ratio': (median_coverage / mean_coverage) if mean_coverage else 0
                 }
-
         except Exception as e:
             print(f"PDF parse hatası ({file_path}): {str(e)}")
             return self.get_default_values()
 
     def extract_value(self, text, pattern):
-        """Verilen pattern'e göre değeri çıkarır"""
         match = re.search(pattern, text)
-        if match:
-            try:
-                return match.group(1)
-            except:
-                return None
-        return None
-
-    def evaluate_quality_weighted(self, data):
-        """Ağırlıklı kalite değerlendirme sistemi"""
+        return match.group(1) if match else None
+    def evaluate_quality(self, data):
+        score = 100
         issues = []
+        recommendations = []
         
-        # 1. Ortalama Kapsama (30 puan)
-        coverage_score = 30
-        if data['mean_coverage'] < MIN_MEAN_COVERAGE_FOR_0:
-            coverage_score = 0
-            issues.append("Ortalama kapsama çok düşük")
-        elif data['mean_coverage'] < MIN_MEAN_COVERAGE_FOR_10:
-            coverage_score = 10
-            issues.append("Ortalama kapsama düşük")
-        elif data['mean_coverage'] < MIN_MEAN_COVERAGE_FOR_20:
-            coverage_score = 20
+        # Ortalama kapsama kontrolü (30 puan)
+        if data['mean_coverage'] < MIN_MEAN_COVERAGE:
+            score -= 30
+            issues.append(f"Düşük ortalama kapsama: {data['mean_coverage']:.1f}x (Min: {MIN_MEAN_COVERAGE}x)")
+            recommendations.append("Kütüphane hazırlama ve sekanslama derinliğini artırın")
         
-        # 2. Medyan/Ortalama Oranı (20 puan)
-        ratio = data['median_coverage'] / data['mean_coverage'] if data['mean_coverage'] else 0
-        ratio_score = 20
-        if ratio < MIN_RATIO_FOR_0:
-            ratio_score = 0
-            issues.append("Medyan/Ortalama oranı kritik seviyede düşük")
-        elif ratio < MIN_RATIO_FOR_10:
-            ratio_score = 10
-            issues.append("Medyan/Ortalama oranı düşük")
+        # Medyan kapsama kontrolü (20 puan)
+        if data['median_coverage'] < MIN_MEDIAN_COVERAGE:
+            score -= 20
+            issues.append(f"Düşük medyan kapsama: {data['median_coverage']:.1f}x (Min: {MIN_MEDIAN_COVERAGE}x)")
+            recommendations.append("Sekanslama kalitesini ve derinliğini artırın")
         
-        # 3. 50x Üzeri Kapsama (30 puan)
-        coverage_50x_score = 30
-        if data['target_50x'] < MIN_TARGET_50X_FOR_0:
-            coverage_50x_score = 0
-            issues.append("50x kapsama kritik seviyede düşük")
-        elif data['target_50x'] < MIN_TARGET_50X_FOR_15:
-            coverage_50x_score = 15
-            issues.append("50x kapsama düşük")
+        # Düşük kapsamalı bölge kontrolü (30 puan)
+        if data['low_coverage_percentage'] > MAX_LOW_COVERAGE_PERCENT:
+            score -= 30
+            issues.append(f"Yüksek oranda düşük kapsamalı bölge: %{data['low_coverage_percentage']:.1f} (Max: %{MAX_LOW_COVERAGE_PERCENT})")
+            recommendations.append("Hedef bölge kapsamasını iyileştirin ve PCR duplikasyonlarını azaltın")
         
-        # 4. Spesifiklik (10 puan)
-        specificity_score = 10
-        if data['specificity'] < MIN_SPECIFICITY_FOR_0:
-            specificity_score = 0
-            issues.append("Spesifiklik kritik seviyede düşük")
-        elif data['specificity'] < MIN_SPECIFICITY_FOR_5:
-            specificity_score = 5
-            issues.append("Spesifiklik düşük")
-        
-        # 5. Düşük Kapsamalı Bölgeler (10 puan)
-        low_coverage_score = 10
-        if data['low_coverage_regions'] > MAX_LOW_COVERAGE_REGIONS_FOR_0:
-            low_coverage_score = 0
-            issues.append("Çok fazla düşük kapsamalı bölge")
-        elif data['low_coverage_regions'] > MAX_LOW_COVERAGE_REGIONS_FOR_5:
-            low_coverage_score = 5
-            issues.append("Düşük kapsamalı bölge sayısı yüksek")
+        # Medyan/Ortalama oranı kontrolü (20 puan)
+        if data['med_mean_ratio'] < MIN_MED_MEAN_RATIO:
+            score -= 20
+            issues.append(f"Düşük Medyan/Ortalama oranı: {data['med_mean_ratio']:.2f} (Min: {MIN_MED_MEAN_RATIO})")
+            recommendations.append("Kütüphane kompleksitesini artırın ve PCR bias'ı azaltın")
 
-        # Toplam Skor
-        total_score = (coverage_score + ratio_score + coverage_50x_score + 
-                      specificity_score + low_coverage_score)
-
-        # Kalite Seviyesi Belirleme
-        if total_score >= 90:
+        # Kalite seviyesi belirleme
+        if score >= 90:
             quality = "MUKEMMEL"
-        elif total_score >= 80:
+            color = "darkgreen"
+        elif score >= 80:
             quality = "COK IYI"
-        elif total_score >= 70:
+            color = "green"
+        elif score >= 70:
             quality = "IYI"
-        elif total_score >= 60:
+            color = "orange"
+        elif score >= 60:
             quality = "INCELEME GEREKLI"
+            color = "orangered"
         else:
             quality = "TEKRAR EDILMELI"
-
-        # Otomatik Kalite Düşürme Kuralları
-        if ratio < MIN_RATIO_FOR_10:
-            quality = min(quality, "IYI")
-        if data['specificity'] < MIN_SPECIFICITY_FOR_5:
-            quality = min(quality, "IYI")
-        if data['target_50x'] < MIN_TARGET_50X_FOR_15:
-            quality = min(quality, "IYI")
+            color = "red"
 
         return {
-            'score': total_score,
+            'score': score,
             'quality': quality,
+            'color': color,
             'issues': issues,
-            'metrics': {
-                'coverage_score': coverage_score,
-                'ratio_score': ratio_score,
-                'coverage_50x_score': coverage_50x_score,
-                'specificity_score': specificity_score,
-                'low_coverage_score': low_coverage_score
-            }
+            'recommendations': recommendations
         }
 
-    def format_detailed_report(self, patient_id, data, quality_result):
-        """Detaylı raporu string olarak formatlar."""
-        coverage_dist = data.get('coverage_distribution', [])
-        coverage_text = "\n".join([
-            f"Coverage {i+1}: {value}%"
-            for i, value in enumerate(coverage_dist)
-        ]) if coverage_dist else "Coverage dağılımı bulunamadı"
+    def format_report(self, patient_id, data, quality_result):
+        # Kapsama dağılımı formatı
+        coverage_dist = "\n".join([
+            f"≥{percent}% bölge kapsaması: %{value:.1f}"
+            for percent, value in data['coverage_distribution']
+        ]) if data['coverage_distribution'] else "Kapsama dağılımı verisi bulunamadı"
+        
+        # Sorunlar ve öneriler formatı
+        issues = "\n".join(['• ' + issue for issue in quality_result['issues']]) \
+                if quality_result['issues'] else 'Önemli bir sorun tespit edilmedi.'
+        
+        recommendations = "\n".join(['• ' + rec for rec in quality_result['recommendations']]) \
+                         if quality_result['recommendations'] else 'İyileştirme önerisi bulunmuyor.'
 
-        issues_text = '\n'.join(['• ' + issue for issue in quality_result['issues']]) \
-            if quality_result['issues'] else 'Önemli bir sorun tespit edilmedi.'
-
-        report = f"""{'='*80}
-                    NGS KALITE RAPORU - {patient_id}
+        report = f"""
+{'='*80}
+NGS KALITE RAPORU - {patient_id}
 {'='*80}
 
 GENEL KALITE DEGERLENDIRMESI:
----------------------------
-Kalite Seviyesi: {quality_result['quality']}
-Toplam Puan: {quality_result['score']}/100
+Kalite Seviyesi: {quality_result['quality']} ({quality_result['score']}/100)
 
-METRIK PUANLARI:
---------------
-Ortalama Kapsama: {quality_result['metrics']['coverage_score']}/30
-Medyan/Ortalama Oranı: {quality_result['metrics']['ratio_score']}/20
-50x Kapsama: {quality_result['metrics']['coverage_50x_score']}/30
-Spesifiklik: {quality_result['metrics']['specificity_score']}/10
-Düşük Kapsamalı Bölgeler: {quality_result['metrics']['low_coverage_score']}/10
-
-DETAYLI METRIKLER:
-----------------
-Ortalama Kapsama: {data['mean_coverage']:.1f}x
-Medyan Kapsama: {data['median_coverage']:.1f}x
-Medyan/Ortalama Oranı: {(data['median_coverage']/data['mean_coverage']):.2f if data['mean_coverage'] else 'N/A'}
-50x Üzeri Kapsama: %{data['target_50x']:.1f}
-Minimum Kapsama: {data['min_coverage']:.1f}x
-Maksimum Kapsama: {data['max_coverage']:.1f}x
+TEMEL METRIKLER:
+• Ortalama Kapsama: {data['mean_coverage']:.1f}x (Min: {MIN_MEAN_COVERAGE}x)
+• Medyan Kapsama: {data['median_coverage']:.1f}x (Min: {MIN_MEDIAN_COVERAGE}x)
+• Medyan/Ortalama Oranı: {data['med_mean_ratio']:.2f} (Min: {MIN_MED_MEAN_RATIO})
+• 50x Üzeri Kapsama: %{data['target_50x']:.1f}
+• Spesifiklik: %{data['specificity']:.1f}
 
 KAPSAMA DAGILIMI:
----------------
-{coverage_text}
+{coverage_dist}
 
-KALITE METRIKLERI:
-----------------
-Hedef Bölge Sayısı: {data['target_regions']}
-Toplam Hedef Uzunluk: {data['total_length']}
-Düşük Kapsamalı Bölge Sayısı (<50x): {data['low_coverage_regions']}
-Spesifiklik Oranı: %{data['specificity']:.1f}
+HEDEF BOLGE ISTATISTIKLERI:
+• Toplam Hedef Bölge Sayısı: {data['target_regions']}
+• Toplam Hedef Uzunluk: {data['total_length']} bp
+• Düşük Kapsamalı Bölge Sayısı: {data['low_coverage_regions']} (%{data['low_coverage_percentage']:.1f})
 
 TESPIT EDILEN SORUNLAR:
----------------------
-{issues_text}
+{issues}
+
+IYILESTIRME ONERILERI:
+{recommendations}
 
 {'='*80}
 """
         return report
 
     def get_default_values(self):
-        """Hata durumunda default değerler"""
         return {
             'mean_coverage': 0,
             'median_coverage': 0,
             'target_50x': 0,
-            'min_coverage': 0,
-            'max_coverage': 0,
             'coverage_distribution': [],
-            'target_regions': 0,
-            'total_length': 0,
+            'target_regions': 856,
+            'total_length': 165127,
             'low_coverage_regions': 0,
-            'specificity': 0
+            'specificity': 90.0,
+            'low_coverage_percentage': 0,
+            'med_mean_ratio': 0
         }
 
+    def generate_reports(self):
+        self.result_text.delete('1.0', END)
+        summary = f"""{'='*80}
+TOPLU SONUC OZETI ({len(self.selected_files)} örnek):
+{'-'*80}
+"""
+        successful_samples = 0
+        total_score = 0
+        quality_counts = {'MUKEMMEL': 0, 'COK IYI': 0, 'IYI': 0, 'INCELEME GEREKLI': 0, 'TEKRAR EDILMELI': 0}
+        
+        for i, file_path in enumerate(self.selected_files, 1):
+            if self.cancel_requested:
+                self.result_text.insert(END, "\nİşlem iptal edildi.\n")
+                break
+                
+            try:
+                patient_id = os.path.basename(file_path).split('_')[0]
+                data = self.parse_coverage_data(file_path)
+                quality_result = self.evaluate_quality(data)
+                
+                quality_counts[quality_result['quality']] += 1
+                
+                if quality_result['score'] >= 70:
+                    successful_samples += 1
+                total_score += quality_result['score']
+                
+                summary += (f"{patient_id}: "
+                          f"Ort={data['mean_coverage']:.1f}x, "
+                          f"Med={data['median_coverage']:.1f}x, "
+                          f"M/O={data['med_mean_ratio']:.2f}, "
+                          f"Düşük={data['low_coverage_percentage']:.1f}%, "
+                          f"Kalite={quality_result['quality']} "
+                          f"({quality_result['score']}/100)\n")
+                
+                report = self.format_report(patient_id, data, quality_result)
+                self.result_text.insert(END, report)
+                
+                self.progress["value"] = i
+                self.root.update_idletasks()
+                
+            except Exception as e:
+                print(f"Hata ({file_path}): {str(e)}")
+                continue
+
+        if self.selected_files:
+            success_rate = (successful_samples / len(self.selected_files)) * 100
+            avg_score = total_score / len(self.selected_files)
+            
+            summary += f"\nKALITE DAGILIMI:"
+            for quality, count in quality_counts.items():
+                if count > 0:
+                    percentage = (count / len(self.selected_files)) * 100
+                    summary += f"\n• {quality}: {count} örnek (%{percentage:.1f})"
+            
+            summary += f"\n\nGENEL BASARI ORANI: %{success_rate:.1f}"
+            summary += f"\nORTALAMA KALITE PUANI: {avg_score:.1f}/100\n"
+
+        self.result_text.insert('1.0', summary + "\n")
+        self.cancel_button.config(state='disabled')
+        self.result_text.see("1.0")
+
     def on_generate_click(self):
-        """Rapor oluşturma için threading üzerinden çağırılır."""
         if not self.selected_files:
             self.result_text.insert('1.0', "Lütfen önce dosya seçin.\n")
             return
-        
+            
         self.cancel_requested = False
         self.cancel_button.config(state='normal')
         self.progress["value"] = 0
@@ -354,71 +317,13 @@ TESPIT EDILEN SORUNLAR:
         thread.start()
 
     def cancel_reports(self):
-        """İptal butonuna basıldığında, iptal isteğini işaretler."""
         self.cancel_requested = True
         self.cancel_button.config(state='disabled')
 
-    def generate_reports(self):
-        """Seçili dosyaları parse ederek rapor oluşturur."""
-        self.result_text.delete('1.0', END)
-        all_results = []
-        summary = f"""{'='*80}\nTOPLU SONUC OZETI ({len(self.selected_files)} dosya):\n{'-'*80}\n"""
-
-        for i, file_path in enumerate(self.selected_files, start=1):
-            if self.cancel_requested:
-                self.result_text.insert(END, "\nİşlem iptal edildi.\n")
-                break
-
-            try:
-                patient_id = os.path.basename(file_path).split('_')[0]
-                data = self.parse_coverage_data(file_path)
-                quality_result = self.evaluate_quality_weighted(data)
-                
-                all_results.append({
-                    'patient_id': patient_id,
-                    'data': data,
-                    'quality_result': quality_result
-                })
-
-                summary += (f"{patient_id}: "
-                          f"Ort={data['mean_coverage']:.1f}x, "
-                          f"Med={data['median_coverage']:.1f}x, "
-                          f"50x>=%{data['target_50x']:.1f}, "
-                          f"Kalite={quality_result['quality']} "
-                          f"(Puan: {quality_result['score']})\n")
-
-                self.progress["value"] = i
-                time.sleep(0.1)  # UI güncellemesi için kısa bekleme
-
-            except Exception as e:
-                print(f"Hata ({file_path}): {str(e)}")
-                continue
-
-        if not self.cancel_requested and all_results:
-            successful = sum(1 for r in all_results if r['quality_result']['score'] >= 70)
-            success_rate = (successful / len(all_results)) * 100
-            summary += f"\nGENEL BASARI ORANI: %{success_rate:.1f}\n"
-
-            failed_samples = [r for r in all_results if r['quality_result']['issues']]
-            if failed_samples:
-                summary += "\nINCELENMESI GEREKEN ORNEKLER:\n"
-                for sample in failed_samples:
-                    issues_joined = ", ".join(sample['quality_result']['issues'])
-                    summary += f"{sample['patient_id']}: {issues_joined}\n"
-
-            summary += f"\n{'='*80}\n\n"
-            self.result_text.insert(END, summary)
-
-            for result in all_results:
-                report = self.format_detailed_report(
-                    result['patient_id'],
-                    result['data'],
-                    result['quality_result']
-                )
-                self.result_text.insert(END, report)
-
-        self.cancel_button.config(state='disabled')
-        self.result_text.see("1.0")
+    def copy_all(self):
+        content = self.result_text.get("1.0", END)
+        self.root.clipboard_clear()
+        self.root.clipboard_append(content)
 
     def run(self):
         self.root.mainloop()
